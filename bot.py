@@ -2,21 +2,18 @@ import os
 import logging
 
 from telegram import Update
-from telegram.ext import (
-    Application,
-    ChatJoinRequestHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, ChatJoinRequestHandler, ContextTypes
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# जिन Premium users को कभी ban नहीं करना है
-# उदाहरण: ADMIN_IDS=123456789,987654321
+# जिन Admin IDs को Premium होने पर भी कभी ban नहीं करना है
+# Render में ऐसे डालेंगे:
+# ADMIN_IDS=123456789,987654321
 ADMIN_IDS = {
     int(x.strip())
     for x in os.getenv("ADMIN_IDS", "").split(",")
@@ -24,103 +21,87 @@ ADMIN_IDS = {
 }
 
 
-async def handle_join_request(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     request = update.chat_join_request
 
     if not request:
         return
 
+    chat_id = request.chat.id
     user = request.from_user
-    chat = request.chat
-
     user_id = user.id
-    name = user.full_name
-    username = f"@{user.username}" if user.username else "No username"
-
-    is_premium = bool(user.is_premium)
 
     logging.info(
-        "Join request: %s | %s | Premium=%s",
-        name,
+        "Join request: %s | ID: %s | Premium: %s",
+        user.full_name,
         user_id,
-        is_premium,
+        user.is_premium
     )
 
-    # 1. Whitelisted admin को हमेशा allow
+    # 1️⃣ Whitelisted Admin → हमेशा ACCEPT
     if user_id in ADMIN_IDS:
         await context.bot.approve_chat_join_request(
-            chat_id=chat.id,
+            chat_id=chat_id,
             user_id=user_id
         )
 
-        logging.info(
-            "WHITELIST APPROVED: %s (%s)",
-            name,
-            user_id
-        )
+        logging.info("Admin approved: %s", user_id)
         return
 
-    # 2. Premium user -> approve फिर तुरंत ban
-    if is_premium:
+    # 2️⃣ Premium लेकिन Admin नहीं → DECLINE + BAN
+    if user.is_premium:
         try:
-            await context.bot.approve_chat_join_request(
-                chat_id=chat.id,
+            # पहले join request decline
+            await context.bot.decline_chat_join_request(
+                chat_id=chat_id,
                 user_id=user_id
             )
 
+            # फिर channel से ban
             await context.bot.ban_chat_member(
-                chat_id=chat.id,
+                chat_id=chat_id,
                 user_id=user_id
             )
 
-            logging.info(
-                "PREMIUM BANNED: %s %s",
-                name,
-                username
-            )
+            logging.info("Premium user banned: %s", user_id)
 
-        except Exception:
-            logging.exception(
-                "Premium user action failed for %s",
-                user_id
+        except Exception as e:
+            logging.error(
+                "Premium ban failed for %s: %s",
+                user_id,
+                e
             )
 
         return
 
-    # 3. Normal/non-Premium user -> approve
+    # 3️⃣ Normal user → ACCEPT
     try:
         await context.bot.approve_chat_join_request(
-            chat_id=chat.id,
+            chat_id=chat_id,
             user_id=user_id
         )
 
-        logging.info(
-            "NORMAL USER APPROVED: %s %s",
-            name,
-            username
-        )
+        logging.info("Normal user approved: %s", user_id)
 
-    except Exception:
-        logging.exception(
-            "Could not approve user %s",
-            user_id
+    except Exception as e:
+        logging.error(
+            "Approval failed for %s: %s",
+            user_id,
+            e
         )
 
 
 def main():
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable is missing")
+        raise RuntimeError("BOT_TOKEN is missing")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(
-        ChatJoinRequestHandler(handle_join_request)
+        ChatJoinRequestHandler(join_request)
     )
 
-    logging.info("Premium Guard Bot started...")
+    logging.info("Premium Guard Bot started")
 
     app.run_polling(
         allowed_updates=["chat_join_request"]
